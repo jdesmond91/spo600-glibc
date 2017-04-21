@@ -207,29 +207,28 @@ L(bulk_entry):
 	stp	data1, data2, [dstin]
 	sub	src, srcin, to_align
 	sub	dst, dstin, to_align
-	b	L(entry_no_page_cross)
 
-	/* The inner loop deals with two Dwords at a time.  This has a
-	   slightly higher start-up cost, but we should win quite quickly,
-	   especially on cores with a high number of issue slots per
-	   cycle, as we get much better parallelism out of the operations.  */
-L(main_loop):
-	stp	data1, data2, [dst], #16
-L(entry_no_page_cross):
-	ldp	data1, data2, [src], #16
-	sub	tmp1, data1, zeroones
-	orr	tmp2, data1, #REP8_7f
-	sub	tmp3, data2, zeroones
-	orr	tmp4, data2, #REP8_7f
-	bic	has_nul1, tmp1, tmp2
-	bics	has_nul2, tmp3, tmp4
-	ccmp	has_nul1, #0, #0, eq	/* NZCV = 0000  */
-	b.eq	L(main_loop)
+L(vector_entry):
+        ld1     {v0.16b}, [src], #16   /* load 16 bytes from src into vector register */ 	 
+	uminv   B3, v0.16b	       /* find the lowest value in the vector */	
+        umov    w10, v3.16b[0] 	       /* store the result of umin into a register */
+	cmp	w10, #0                /* compare the result to 0 */  	
+	b.eq	L(byte_entry)          /* if the two are equal, prep for copying one byte at a time */
 
-	/* Since we know we are copying at least 16 bytes, the fastest way
-	   to deal with the tail is to determine the location of the
-	   trailing NUL, then (re)copy the 16 bytes leading up to that.  */
-	cmp	has_nul1, #0
+L(vector_store):
+	st1	{v0.16b}, [dst], #16   /* if null was not found, then store 16 bytes into dst */   
+	b	L(vector_entry)        /* loop back to vector entry */
+
+L(byte_entry):
+	sub	src, src, #16          /* if the null was found, then we need to go back 16 bytes */
+	b	L(byte_copy)           /* enter byte by byte copy */
+
+L(byte_copy):
+	ldrb	w1, [src], #1          /* load one byte at a time */ 
+	strb	w1, [dst], #1
+	cmp	w1, #0                 /* check for null */
+	b.ne	L(byte_copy)           /* if null isn't found then continue copying */
+
 #ifdef __AARCH64EB__
 	/* For big-endian, carry propagation (if the final byte in the
 	   string is 0x01) means we cannot use has_nul directly.  The
